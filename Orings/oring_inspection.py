@@ -206,6 +206,8 @@ def radial_features(ring_mask: np.ndarray, n_angles: int = 720):
     maxR = math.hypot(max(cx, W - 1 - cx), max(cy, H - 1 - cy))
 
     segcount = np.zeros(n_angles, dtype=np.int32)
+    inner = []
+    outer = []
     thick = []
 
     for i in range(n_angles):
@@ -235,7 +237,6 @@ def radial_features(ring_mask: np.ndarray, n_angles: int = 720):
         if c == 0:
             continue
 
-        # thickness of first segment
         s0 = None
         s1 = None
         for idx, v in enumerate(vals):
@@ -247,15 +248,24 @@ def radial_features(ring_mask: np.ndarray, n_angles: int = 720):
         if s1 is None:
             s1 = len(vals) - 1
 
+        inner.append(s0)
+        outer.append(s1)
         thick.append(s1 - s0 + 1)
 
     if not thick:
         return None
 
+    inner = np.array(inner, dtype=np.float32)
+    outer = np.array(outer, dtype=np.float32)
     thick = np.array(thick, dtype=np.float32)
+
     return {
         "missing_frac": float(np.mean(segcount == 0)),
         "seg_gt1_frac": float(np.mean(segcount > 1)),
+        "inner_mean": float(np.mean(inner)),
+        "inner_std": float(np.std(inner)),
+        "outer_mean": float(np.mean(outer)),
+        "outer_std": float(np.std(outer)),
         "thick_mean": float(np.mean(thick)),
         "thick_std": float(np.std(thick)),
         "thick_min": float(np.min(thick)),
@@ -273,6 +283,10 @@ def classify_orings(feat: dict):
         return "FAIL", "Thin/missing material"
     if feat["thick_std"] > 0.20 * feat["thick_mean"]:
         return "FAIL", "Thickness variation"
+    if feat["outer_std"] > 0.12 * feat["outer_mean"]:
+        return "FAIL", "Outer radius variation"
+    if feat["inner_std"] > 0.12 * feat["inner_mean"]:
+        return "FAIL", "Inner radius variation"
     return "PASS", "OK"
 
 
@@ -288,14 +302,12 @@ def process_one(path: str, out_dir: str):
     bin01 = (gray < t).astype(np.uint8)
     bin01 = close(bin01, k=5, iters=1)
 
-    ring_mask, bbox = largest_component_mask(bin01)
-    feat = radial_features(ring_mask, n_angles=720)
+    ring, bbox = largest_component_mask(bin01)
+
+    feat = radial_features(ring, n_angles=720)
     verdict, reason = classify_orings(feat)
 
     dt_ms = (time.perf_counter() - t0) * 1000.0
-
-    base = os.path.splitext(os.path.basename(path))[0]
-    cv2.imwrite(os.path.join(out_dir, f"{base}_ring_mask.png"), (ring_mask * 255).astype(np.uint8))
 
     out = img.copy()
     if bbox is not None:
@@ -309,9 +321,31 @@ def process_one(path: str, out_dir: str):
     cv2.putText(out, f"Proc time: {dt_ms:.2f} ms", (10, 58),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 
-    cv2.imwrite(os.path.join(out_dir, f"{base}_annotated.png"), out)
+    base = os.path.splitext(os.path.basename(path))[0]
+    out_path = os.path.join(out_dir, f"{base}_annotated.png")
+    cv2.imwrite(out_path, out)
 
-    return {"file": os.path.basename(path), "verdict": verdict, "reason": reason, "time_ms": dt_ms}
+    mask_vis = cv2.cvtColor((ring * 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
+    cv2.putText(mask_vis, "Largest CC mask", (10, 18),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    cv2.imwrite(os.path.join(out_dir, f"{base}_mask.png"), mask_vis)
+
+    row = {
+        "file": os.path.basename(path),
+        "otsu_t": t,
+        "verdict": verdict,
+        "reason": reason,
+        "time_ms": dt_ms,
+    }
+    if feat is not None:
+        row.update({
+            "missing_frac": feat["missing_frac"],
+            "seg_gt1_frac": feat["seg_gt1_frac"],
+            "thick_mean": feat["thick_mean"],
+            "thick_std": feat["thick_std"],
+            "thick_min": feat["thick_min"],
+        })
+    return row
 
 
 def main():
@@ -324,10 +358,20 @@ def main():
              if os.path.splitext(f.lower())[1] in exts]
     files.sort()
 
+    results = []
     for p in files:
         r = process_one(p, out_dir)
-        if r:
+        if r is not None:
+            results.append(r)
             print(r["file"], "->", r["verdict"], "-", r["reason"], f"({r['time_ms']:.2f} ms)")
+
+    csv_path = os.path.join(out_dir, "summary.csv")
+    if results:
+        keys = sorted(results[0].keys())
+        with open(csv_path, "w", encoding="utf-8") as f:
+            f.write(",".join(keys) + "\n")
+            for r in results:
+                f.write(",".join(str(r.get(k, "")) for k in keys) + "\n")
 
     print("Done. Outputs in:", out_dir)
 
