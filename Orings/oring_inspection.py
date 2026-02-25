@@ -414,7 +414,8 @@ def process_one(path: str, out_dir: str):
 
     # save a visual of the mask as well (largest CC in white, rest black)
     mask_vis = (ring * 255).astype(np.uint8)
-    mask_vis = cv2.cvtColor(mask_vis, cv2.COLOR_GRAY2BGR)
+    mask_vis = (ring * 255).astype(np.uint8)
+    mask_vis = np.stack([mask_vis, mask_vis, mask_vis], axis=2)  # Gray->BGR without cv2
     cv2.putText(mask_vis, "Largest CC mask", (10, 18),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
