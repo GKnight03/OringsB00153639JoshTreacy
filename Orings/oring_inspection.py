@@ -6,7 +6,6 @@ import numpy as np
 
 
 def to_gray(bgr: np.ndarray) -> np.ndarray:
-    """Convert BGR -> grayscale (uint8) without cv2.cvtColor."""
     if bgr.ndim == 2:
         return bgr.astype(np.uint8)
     b = bgr[:, :, 0].astype(np.float32)
@@ -17,19 +16,13 @@ def to_gray(bgr: np.ndarray) -> np.ndarray:
 
 
 def hist256(gray: np.ndarray) -> np.ndarray:
-    """Compute 256-bin histogram without cv2."""
     h = np.zeros(256, dtype=np.int64)
-    flat = gray.ravel()
-    for v in flat:
+    for v in gray.ravel():
         h[int(v)] += 1
     return h
 
 
 def otsu_threshold(gray: np.ndarray) -> int:
-    """
-    Otsu threshold selection from histogram.
-    Foreground = gray < t (dark object on light background).
-    """
     h = hist256(gray)
     total = gray.size
 
@@ -64,6 +57,56 @@ def otsu_threshold(gray: np.ndarray) -> int:
     return int(best_t)
 
 
+# ---- morphology (integral image) ----
+def integral_image(bin01: np.ndarray) -> np.ndarray:
+    ii = np.zeros((bin01.shape[0] + 1, bin01.shape[1] + 1), dtype=np.int32)
+    ii[1:, 1:] = np.cumsum(np.cumsum(bin01.astype(np.int32), axis=0), axis=1)
+    return ii
+
+
+def window_sum(ii: np.ndarray, y0: int, x0: int, y1: int, x1: int) -> int:
+    return ii[y1, x1] - ii[y0, x1] - ii[y1, x0] + ii[y0, x0]
+
+
+def erode(bin01: np.ndarray, k: int) -> np.ndarray:
+    assert k % 2 == 1
+    r = k // 2
+    H, W = bin01.shape
+    padded = np.pad(bin01, ((r, r), (r, r)), mode="constant", constant_values=0)
+    ii = integral_image(padded)
+
+    out = np.zeros((H, W), dtype=np.uint8)
+    area = k * k
+    for y in range(H):
+        for x in range(W):
+            s = window_sum(ii, y, x, y + k, x + k)
+            out[y, x] = 1 if s == area else 0
+    return out
+
+
+def dilate(bin01: np.ndarray, k: int) -> np.ndarray:
+    assert k % 2 == 1
+    r = k // 2
+    H, W = bin01.shape
+    padded = np.pad(bin01, ((r, r), (r, r)), mode="constant", constant_values=0)
+    ii = integral_image(padded)
+
+    out = np.zeros((H, W), dtype=np.uint8)
+    for y in range(H):
+        for x in range(W):
+            s = window_sum(ii, y, x, y + k, x + k)
+            out[y, x] = 1 if s > 0 else 0
+    return out
+
+
+def close(bin01: np.ndarray, k: int, iters: int = 1) -> np.ndarray:
+    out = bin01.copy()
+    for _ in range(iters):
+        out = dilate(out, k)
+        out = erode(out, k)
+    return out
+
+
 def process_one(path: str, out_dir: str):
     img = cv2.imread(path)
     if img is None:
@@ -75,12 +118,13 @@ def process_one(path: str, out_dir: str):
     t = otsu_threshold(gray)
     bin01 = (gray < t).astype(np.uint8)
 
+    # morphology: close small gaps/holes
+    bin01 = close(bin01, k=5, iters=1)
+
     dt_ms = (time.perf_counter() - t0) * 1000.0
 
-    # Save basic outputs
     base = os.path.splitext(os.path.basename(path))[0]
-    bin_vis = (bin01 * 255).astype(np.uint8)
-    cv2.imwrite(os.path.join(out_dir, f"{base}_binary.png"), bin_vis)
+    cv2.imwrite(os.path.join(out_dir, f"{base}_binary_closed.png"), (bin01 * 255).astype(np.uint8))
 
     out = img.copy()
     cv2.putText(out, f"Otsu t={t}", (10, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
@@ -103,7 +147,7 @@ def main():
     for p in files:
         r = process_one(p, out_dir)
         if r:
-            print(r["file"], "-> otsu", r["otsu_t"], f"({r['time_ms']:.2f} ms)")
+            print(r["file"], "-> closed binary", f"({r['time_ms']:.2f} ms)")
 
     print("Done. Outputs in:", out_dir)
 
