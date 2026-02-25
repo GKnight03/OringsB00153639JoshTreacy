@@ -162,7 +162,6 @@ def largest_component_mask(bin01: np.ndarray):
 
 
 def fill_holes(bin01: np.ndarray) -> np.ndarray:
-    """Flood-fill background from border; remaining 0s are holes -> set to 1."""
     H, W = bin01.shape
     visited = np.zeros((H, W), dtype=np.uint8)
     q = deque()
@@ -194,8 +193,7 @@ def fill_holes(bin01: np.ndarray) -> np.ndarray:
     return out
 
 
-def radial_features(ring_mask: np.ndarray, n_angles: int = 360):
-    """Extract simple radial thickness features (no classification yet)."""
+def radial_features(ring_mask: np.ndarray, n_angles: int = 720):
     filled = fill_holes(ring_mask)
     ys, xs = np.nonzero(filled)
     if len(xs) == 0:
@@ -207,8 +205,9 @@ def radial_features(ring_mask: np.ndarray, n_angles: int = 360):
     H, W = ring_mask.shape
     maxR = math.hypot(max(cx, W - 1 - cx), max(cy, H - 1 - cy))
 
+    segcount = np.zeros(n_angles, dtype=np.int32)
     thick = []
-    missing = 0
+
     for i in range(n_angles):
         ang = 2 * math.pi * i / n_angles
         dy = math.sin(ang)
@@ -223,18 +222,28 @@ def radial_features(ring_mask: np.ndarray, n_angles: int = 360):
                 break
             vals.append(ring_mask[y, x])
 
-        # find first segment thickness
+        c = 0
+        in_fg = False
+        for v in vals:
+            if v == 1 and not in_fg:
+                c += 1
+                in_fg = True
+            elif v == 0 and in_fg:
+                in_fg = False
+        segcount[i] = c
+
+        if c == 0:
+            continue
+
+        # thickness of first segment
         s0 = None
         s1 = None
         for idx, v in enumerate(vals):
             if v == 1 and s0 is None:
                 s0 = idx
-            if v == 0 and s0 is not None:
+            if v == 0 and s0 is not None and s1 is None:
                 s1 = idx - 1
                 break
-        if s0 is None:
-            missing += 1
-            continue
         if s1 is None:
             s1 = len(vals) - 1
 
@@ -245,12 +254,26 @@ def radial_features(ring_mask: np.ndarray, n_angles: int = 360):
 
     thick = np.array(thick, dtype=np.float32)
     return {
-        "cx": cx, "cy": cy,
-        "missing_frac": float(missing / n_angles),
+        "missing_frac": float(np.mean(segcount == 0)),
+        "seg_gt1_frac": float(np.mean(segcount > 1)),
         "thick_mean": float(np.mean(thick)),
         "thick_std": float(np.std(thick)),
         "thick_min": float(np.min(thick)),
     }
+
+
+def classify_orings(feat: dict):
+    if feat is None:
+        return "FAIL", "No ring detected"
+    if feat["seg_gt1_frac"] > 0.01:
+        return "FAIL", "Broken/open ring"
+    if feat["missing_frac"] > 0.01:
+        return "FAIL", "Missing sector"
+    if feat["thick_min"] < 0.55 * feat["thick_mean"]:
+        return "FAIL", "Thin/missing material"
+    if feat["thick_std"] > 0.20 * feat["thick_mean"]:
+        return "FAIL", "Thickness variation"
+    return "PASS", "OK"
 
 
 def process_one(path: str, out_dir: str):
@@ -266,7 +289,8 @@ def process_one(path: str, out_dir: str):
     bin01 = close(bin01, k=5, iters=1)
 
     ring_mask, bbox = largest_component_mask(bin01)
-    feat = radial_features(ring_mask, n_angles=360)
+    feat = radial_features(ring_mask, n_angles=720)
+    verdict, reason = classify_orings(feat)
 
     dt_ms = (time.perf_counter() - t0) * 1000.0
 
@@ -278,15 +302,16 @@ def process_one(path: str, out_dir: str):
         minx, miny, maxx, maxy = bbox
         cv2.rectangle(out, (minx, miny), (maxx, maxy), (0, 255, 0), 1)
 
-    cv2.putText(out, f"Otsu t={t}", (10, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-    cv2.putText(out, f"time={dt_ms:.2f}ms", (10, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-    if feat is not None:
-        cv2.putText(out, f"th_mean={feat['thick_mean']:.1f} th_std={feat['thick_std']:.1f}",
-                    (10, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+    cv2.putText(out, f"Threshold (Otsu): {t}", (10, 18),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+    cv2.putText(out, f"Result: {verdict} ({reason})", (10, 38),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+    cv2.putText(out, f"Proc time: {dt_ms:.2f} ms", (10, 58),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 
     cv2.imwrite(os.path.join(out_dir, f"{base}_annotated.png"), out)
 
-    return {"file": os.path.basename(path), "otsu_t": t, "time_ms": dt_ms}
+    return {"file": os.path.basename(path), "verdict": verdict, "reason": reason, "time_ms": dt_ms}
 
 
 def main():
@@ -302,7 +327,7 @@ def main():
     for p in files:
         r = process_one(p, out_dir)
         if r:
-            print(r["file"], "-> features extracted", f"({r['time_ms']:.2f} ms)")
+            print(r["file"], "->", r["verdict"], "-", r["reason"], f"({r['time_ms']:.2f} ms)")
 
     print("Done. Outputs in:", out_dir)
 
