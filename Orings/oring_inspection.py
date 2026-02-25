@@ -203,7 +203,7 @@ def largest_component_mask(bin01: np.ndarray):
 def fill_holes(bin01: np.ndarray) -> np.ndarray:
     """
     Flood-fill background from border; any remaining 0s are holes -> set to 1.
-    This will fill the donut's inner hole as well (useful to estimate true center).
+    This will fill the donut's inner hole as well (useful to estimate true centre).
     """
     H, W = bin01.shape
     visited = np.zeros((H, W), dtype=np.uint8)
@@ -238,7 +238,7 @@ def fill_holes(bin01: np.ndarray) -> np.ndarray:
 
 
 # -----------------------------------------
-# 5) Defect analysis by radial/polar sampling from estimated center
+# 5) Defect analysis by radial/polar sampling from estimated centre
 # -----------------------------------------
 
 def radial_features(ring_mask: np.ndarray, n_angles: int = 720):
@@ -248,7 +248,7 @@ def radial_features(ring_mask: np.ndarray, n_angles: int = 720):
     - fraction of angles that see >1 foreground segment (broken/open ring symptom)
     - thickness stats and inner/outer radius variation
     """
-    # Estimate geometric center using filled disk centroid (fills inner hole, but not outer gaps/breaks, which is what we want for a stable center).
+    # Estimate geometric centre using filled disk centroid: fills inner hole to get a stable centre estimate, avoiding peripheral gaps/breaks
     filled = fill_holes(ring_mask)
     ys, xs = np.nonzero(filled)
     if len(xs) == 0:
@@ -295,7 +295,7 @@ def radial_features(ring_mask: np.ndarray, n_angles: int = 720):
         if c == 0:
             continue
 
-        # take the FIRST segment (closest ring material along that direction); if multiple segments, it's a broken/open ring symptom (we see the far side of the break)
+        # Extract the first segment (closest ring material along that direction): multiple segments indicate a broken/open ring
         s0 = None
         s1 = None
         for idx, v in enumerate(vals):
@@ -337,16 +337,16 @@ def radial_features(ring_mask: np.ndarray, n_angles: int = 720):
 
 def classify_orings(feat: dict):
     """
-    Heuristic classifier (tune thresholds if needed after you inspect outputs).
+    Heuristic classifier that checks multiple defect conditions and returns a pass/fail verdict with reasoning.
     """
     if feat is None:
         return "FAIL", "No ring detected"
 
-    # broken/open ring often causes rays to hit multiple segments (you see the far side of the break); tune threshold if needed after inspecting outputs (we want to allow small cracks but not large breaks)
+    # Detects broken/open rings: multiple ray segments indicate the ring is broken, revealing the far side of the break
     if feat["seg_gt1_frac"] > 0.01:
         return "FAIL", "Broken/open ring"
 
-    # if rays see no ring at all (large missing sector or segmentation failure), it's a fail; tune threshold if needed after inspecting outputs (we want to allow small gaps but not large ones)
+    # Detects missing sectors: if rays see no ring at all, indicates a large missing sector or segmentation failure
     if feat["missing_frac"] > 0.01:
         return "FAIL", "Missing sector"
 
@@ -357,7 +357,7 @@ def classify_orings(feat: dict):
     if feat["thick_std"] > 0.20 * feat["thick_mean"]:
         return "FAIL", "Thickness variation"
 
-    # radius variation checks (bumps/flash/shape deformation); tune if needed
+    # Detects radius variation (bumps/flash/shape deformation): checks if outer radius variation indicates material defects
     if feat["outer_std"] > 0.12 * feat["outer_mean"]:
         return "FAIL", "Outer radius variation"
 
@@ -380,17 +380,16 @@ def process_one(path: str, out_dir: str):
 
     gray = to_gray(img)
 
-    # automatic threshold (Otsu) to separate dark ring from light background; no need for manual tuning here
+    # Apply automatic threshold using Otsu's method to separate dark ring from light background
     t = otsu_threshold(gray)
 
     # object is darker than background => foreground = gray < t
     bin01 = (gray < t).astype(np.uint8)
 
-    # morphology: close small cracks/holes in the rubber (do NOT "repair" huge breaks that indicate real defects)
-    # tune k/iters if needed after inspecting outputs; we want to close small gaps but not large ones that indicate real defects
+    # Morphological closing: fills small cracks/holes in the rubber without repairing large breaks that indicate real defects
     bin01 = close(bin01, k=5, iters=1)
 
-    # largest CC is the O-ring (hopefully); also get its bbox for visualization
+    # Extract the largest connected component as the O-ring and get its bounding box for visualisation
     ring, bbox = largest_component_mask(bin01)
 
     # features + classify
@@ -399,7 +398,7 @@ def process_one(path: str, out_dir: str):
 
     dt_ms = (time.perf_counter() - t0) * 1000.0
 
-    # annotate output image with bbox, verdict, reason, timing, and save a visualization of the mask as well
+    # annotate output image with bbox, verdict, reason, timing, and save a visualisation of the mask as well
     out = img.copy()
     if bbox is not None:
         minx, miny, maxx, maxy = bbox
@@ -413,7 +412,6 @@ def process_one(path: str, out_dir: str):
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 
     # save a visual of the mask as well (largest CC in white, rest black)
-    mask_vis = (ring * 255).astype(np.uint8)
     mask_vis = (ring * 255).astype(np.uint8)
     mask_vis = np.stack([mask_vis, mask_vis, mask_vis], axis=2)  # Gray->BGR without cv2
     cv2.putText(mask_vis, "Largest CC mask", (10, 18),
