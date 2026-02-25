@@ -1,5 +1,6 @@
 import os
 import time
+import math
 from collections import deque
 
 import cv2
@@ -160,6 +161,98 @@ def largest_component_mask(bin01: np.ndarray):
     return (labels == lab).astype(np.uint8), bboxes[idx]
 
 
+def fill_holes(bin01: np.ndarray) -> np.ndarray:
+    """Flood-fill background from border; remaining 0s are holes -> set to 1."""
+    H, W = bin01.shape
+    visited = np.zeros((H, W), dtype=np.uint8)
+    q = deque()
+
+    for x in range(W):
+        if bin01[0, x] == 0: visited[0, x] = 1; q.append((0, x))
+        if bin01[H - 1, x] == 0 and visited[H - 1, x] == 0:
+            visited[H - 1, x] = 1; q.append((H - 1, x))
+
+    for y in range(H):
+        if bin01[y, 0] == 0 and visited[y, 0] == 0:
+            visited[y, 0] = 1; q.append((y, 0))
+        if bin01[y, W - 1] == 0 and visited[y, W - 1] == 0:
+            visited[y, W - 1] = 1; q.append((y, W - 1))
+
+    dirs4 = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+    while q:
+        y, x = q.popleft()
+        for dy, dx in dirs4:
+            ny, nx = y + dy, x + dx
+            if 0 <= ny < H and 0 <= nx < W:
+                if visited[ny, nx] == 0 and bin01[ny, nx] == 0:
+                    visited[ny, nx] = 1
+                    q.append((ny, nx))
+
+    out = bin01.copy()
+    holes = (bin01 == 0) & (visited == 0)
+    out[holes] = 1
+    return out
+
+
+def radial_features(ring_mask: np.ndarray, n_angles: int = 360):
+    """Extract simple radial thickness features (no classification yet)."""
+    filled = fill_holes(ring_mask)
+    ys, xs = np.nonzero(filled)
+    if len(xs) == 0:
+        return None
+
+    cy = float(np.mean(ys))
+    cx = float(np.mean(xs))
+
+    H, W = ring_mask.shape
+    maxR = math.hypot(max(cx, W - 1 - cx), max(cy, H - 1 - cy))
+
+    thick = []
+    missing = 0
+    for i in range(n_angles):
+        ang = 2 * math.pi * i / n_angles
+        dy = math.sin(ang)
+        dx = math.cos(ang)
+
+        steps = int(maxR) + 1
+        vals = []
+        for s in range(steps):
+            y = int(round(cy + dy * s))
+            x = int(round(cx + dx * s))
+            if y < 0 or y >= H or x < 0 or x >= W:
+                break
+            vals.append(ring_mask[y, x])
+
+        # find first segment thickness
+        s0 = None
+        s1 = None
+        for idx, v in enumerate(vals):
+            if v == 1 and s0 is None:
+                s0 = idx
+            if v == 0 and s0 is not None:
+                s1 = idx - 1
+                break
+        if s0 is None:
+            missing += 1
+            continue
+        if s1 is None:
+            s1 = len(vals) - 1
+
+        thick.append(s1 - s0 + 1)
+
+    if not thick:
+        return None
+
+    thick = np.array(thick, dtype=np.float32)
+    return {
+        "cx": cx, "cy": cy,
+        "missing_frac": float(missing / n_angles),
+        "thick_mean": float(np.mean(thick)),
+        "thick_std": float(np.std(thick)),
+        "thick_min": float(np.min(thick)),
+    }
+
+
 def process_one(path: str, out_dir: str):
     img = cv2.imread(path)
     if img is None:
@@ -173,6 +266,7 @@ def process_one(path: str, out_dir: str):
     bin01 = close(bin01, k=5, iters=1)
 
     ring_mask, bbox = largest_component_mask(bin01)
+    feat = radial_features(ring_mask, n_angles=360)
 
     dt_ms = (time.perf_counter() - t0) * 1000.0
 
@@ -186,6 +280,10 @@ def process_one(path: str, out_dir: str):
 
     cv2.putText(out, f"Otsu t={t}", (10, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
     cv2.putText(out, f"time={dt_ms:.2f}ms", (10, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+    if feat is not None:
+        cv2.putText(out, f"th_mean={feat['thick_mean']:.1f} th_std={feat['thick_std']:.1f}",
+                    (10, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+
     cv2.imwrite(os.path.join(out_dir, f"{base}_annotated.png"), out)
 
     return {"file": os.path.basename(path), "otsu_t": t, "time_ms": dt_ms}
@@ -204,7 +302,7 @@ def main():
     for p in files:
         r = process_one(p, out_dir)
         if r:
-            print(r["file"], "-> ring extracted", f"({r['time_ms']:.2f} ms)")
+            print(r["file"], "-> features extracted", f"({r['time_ms']:.2f} ms)")
 
     print("Done. Outputs in:", out_dir)
 
