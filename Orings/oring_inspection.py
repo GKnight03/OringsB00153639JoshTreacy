@@ -1,5 +1,6 @@
 import os
 import time
+from collections import deque
 
 import cv2
 import numpy as np
@@ -57,7 +58,6 @@ def otsu_threshold(gray: np.ndarray) -> int:
     return int(best_t)
 
 
-# ---- morphology (integral image) ----
 def integral_image(bin01: np.ndarray) -> np.ndarray:
     ii = np.zeros((bin01.shape[0] + 1, bin01.shape[1] + 1), dtype=np.int32)
     ii[1:, 1:] = np.cumsum(np.cumsum(bin01.astype(np.int32), axis=0), axis=1)
@@ -107,6 +107,59 @@ def close(bin01: np.ndarray, k: int, iters: int = 1) -> np.ndarray:
     return out
 
 
+DIRS8 = [(-1, 0), (1, 0), (0, -1), (0, 1),
+         (-1, -1), (-1, 1), (1, -1), (1, 1)]
+
+
+def connected_components(bin01: np.ndarray):
+    H, W = bin01.shape
+    labels = np.zeros((H, W), dtype=np.int32)
+
+    current = 0
+    areas = []
+    bboxes = []
+
+    for y in range(H):
+        for x in range(W):
+            if bin01[y, x] == 1 and labels[y, x] == 0:
+                current += 1
+                q = deque([(y, x)])
+                labels[y, x] = current
+
+                area = 0
+                miny = maxy = y
+                minx = maxx = x
+
+                while q:
+                    cy, cx = q.popleft()
+                    area += 1
+                    if cy < miny: miny = cy
+                    if cy > maxy: maxy = cy
+                    if cx < minx: minx = cx
+                    if cx > maxx: maxx = cx
+
+                    for dy, dx in DIRS8:
+                        ny, nx = cy + dy, cx + dx
+                        if 0 <= ny < H and 0 <= nx < W:
+                            if bin01[ny, nx] == 1 and labels[ny, nx] == 0:
+                                labels[ny, nx] = current
+                                q.append((ny, nx))
+
+                areas.append(area)
+                bboxes.append((minx, miny, maxx, maxy))
+
+    return labels, areas, bboxes
+
+
+def largest_component_mask(bin01: np.ndarray):
+    labels, areas, bboxes = connected_components(bin01)
+    if not areas:
+        return np.zeros_like(bin01), None
+    idx = int(np.argmax(areas))
+    lab = idx + 1
+    return (labels == lab).astype(np.uint8), bboxes[idx]
+
+
 def process_one(path: str, out_dir: str):
     img = cv2.imread(path)
     if img is None:
@@ -117,16 +170,20 @@ def process_one(path: str, out_dir: str):
     gray = to_gray(img)
     t = otsu_threshold(gray)
     bin01 = (gray < t).astype(np.uint8)
-
-    # morphology: close small gaps/holes
     bin01 = close(bin01, k=5, iters=1)
+
+    ring_mask, bbox = largest_component_mask(bin01)
 
     dt_ms = (time.perf_counter() - t0) * 1000.0
 
     base = os.path.splitext(os.path.basename(path))[0]
-    cv2.imwrite(os.path.join(out_dir, f"{base}_binary_closed.png"), (bin01 * 255).astype(np.uint8))
+    cv2.imwrite(os.path.join(out_dir, f"{base}_ring_mask.png"), (ring_mask * 255).astype(np.uint8))
 
     out = img.copy()
+    if bbox is not None:
+        minx, miny, maxx, maxy = bbox
+        cv2.rectangle(out, (minx, miny), (maxx, maxy), (0, 255, 0), 1)
+
     cv2.putText(out, f"Otsu t={t}", (10, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
     cv2.putText(out, f"time={dt_ms:.2f}ms", (10, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
     cv2.imwrite(os.path.join(out_dir, f"{base}_annotated.png"), out)
@@ -147,7 +204,7 @@ def main():
     for p in files:
         r = process_one(p, out_dir)
         if r:
-            print(r["file"], "-> closed binary", f"({r['time_ms']:.2f} ms)")
+            print(r["file"], "-> ring extracted", f"({r['time_ms']:.2f} ms)")
 
     print("Done. Outputs in:", out_dir)
 
